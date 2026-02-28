@@ -16,8 +16,21 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+    if (cmd == NULL) {
+        fprintf(stderr, "Error: NULL command passed to do_system\n");
+        return false;
+    }
+    int status = system(cmd);
 
+    if (status == -1)
+    {
+    perror("system");
+    return false;
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
     return true;
+
+    return false;
 }
 
 /**
@@ -58,10 +71,43 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
-
     va_end(args);
+    if (command[0][0] != '/') 
+    {
+    fprintf(stderr, "Error: %s is not an absolute path\n", command[0]);
+    return false;
+    }
+    __pid_t pid;
+    fflush(stdout);
+    pid = fork();
+    if (pid == -1)
+    {
+        perror("fork");
+        return false;
+    }
+    else if(pid == 0)
+    {
+        execv(command[0], command);
+        
+        perror("execv");
 
-    return true;
+        exit(EXIT_FAILURE); 
+        
+    }
+    else
+    {
+    int status;
+
+    if (waitpid(pid,&status,0) == -1)
+    {
+        perror("wait");
+        return false;
+    }
+    if(WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return true;
+    }
+
+    return false;
 }
 
 /**
@@ -80,9 +126,6 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
 
 
 /*
@@ -92,8 +135,45 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
-
     va_end(args);
+    if (command[0][0] != '/') 
+    {
+    fprintf(stderr, "Error: %s is not an absolute path\n", command[0]);
+    return false;
+    }
 
-    return true;
+    int childpid;
+
+    int status;
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if (fd == -1)
+    {
+        perror("open");
+        return false;
+    }
+    fflush(stdout);
+   
+    switch(childpid = fork())
+    {
+        case -1:
+        perror("fork");
+        break;
+        case 0:
+        if(dup2(fd,1) < 0) {perror("dup2"); return false;}
+        close(fd);
+        execv(command[0],command);
+        perror("execv"); return false;
+        break;
+        default:
+        close(fd);
+        if (waitpid(childpid,&status,0) == -1)
+        {
+        perror("wait");
+        return false;
+        }
+        if(WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return true;
+    }
+
+    return false;
 }
