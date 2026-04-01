@@ -1,8 +1,9 @@
 #include "aesdsocket.h"
-
+pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
+timer_t timer;
 volatile sig_atomic_t caught_signal = 0;
 int socketfd = -1;
-int client_fd = -1;
+int c_fd = -1;
 
 void signal_handler(int signo)
 {
@@ -14,8 +15,10 @@ void signal_handler(int signo)
 }
 void cleanup(void)
 {
+    timer_delete(timer);
+    pthread_mutex_destroy(&file_mutex);
     if(socketfd != -1)  close(socketfd);
-    if(client_fd != -1)  close(client_fd);
+    if(c_fd != -1)  close(c_fd);
     remove(FILE_NAME);
     closelog();
 }
@@ -64,25 +67,10 @@ int setup_socket(void)
     return 0;
 }
 
-int handle_connection(void)
+//thread function
+void *thread_connection(void *args)
 {
-    struct sockaddr_storage client_addr;
-    socklen_t addr_size = sizeof(client_addr);
-    client_fd = accept(socketfd, (struct sockaddr*)&client_addr, &addr_size);
-
-    if(client_fd == -1)
-    {
-        if(errno == EINTR)
-        {
-            return 0;
-        }
-        perror("accept");
-        return -1;
-    }
-    char client_ip[INET6_ADDRSTRLEN];
-    struct sockaddr_in *s = (struct sockaddr_in *)&client_addr;
-    inet_ntop(AF_INET, &s->sin_addr, client_ip, sizeof(client_ip));
-    syslog(LOG_INFO, "Accepted connection from %s", client_ip);
+    thread_node_t *thread = (thread_node_t*)args;//cast the args ptr to thread node struct
 
     char* heap_buffer;
     char stack_buffer[RECV_BUFSIZE];
@@ -92,28 +80,27 @@ int handle_connection(void)
     if(heap_buffer == NULL)
     {
     perror("malloc");
-    return -1;
+    thread->thread_complete = true;
+    return NULL;
     }
     while(1)
     {
-        int n = recv(client_fd,stack_buffer,sizeof(stack_buffer),0);
+        int n = recv(thread->client_fd,stack_buffer,sizeof(stack_buffer),0);
 
         if (n == 0) //completion
         {
             free(heap_buffer);
-            close(client_fd);
-            client_fd = -1;
-            syslog(LOG_INFO, "Closed connection from %s", client_ip);
-            return 0;
+            close(thread->client_fd);
+            thread->client_fd = -1;
+            syslog(LOG_INFO, "Closed connection from %s", thread->client_ip);
+            thread->thread_complete = true;
+            return NULL;
         } 
         if (n == -1) 
         {   
             free(heap_buffer);
-            if(errno == EINTR)
-            {
-                return 0;
-            }
-            return -1;
+            thread->thread_complete = true;
+            return NULL;
         } //failiure
         for(int i =0; i < n; i++)
         {
@@ -121,15 +108,18 @@ int handle_connection(void)
             {
                 //message complete
                 heap_buffer[msg_pos] = '\0'; //null termintating the buffer before passing it 
-                if(process_message(heap_buffer) == -1)
+                pthread_mutex_lock(&file_mutex);//lock
+                if(process_message(heap_buffer, thread->client_fd) == -1)
                 {
                     free(heap_buffer);
-                    close(client_fd);
-                    client_fd = -1;
-                    return -1;
+                    close(thread->client_fd);
+                    pthread_mutex_unlock(&file_mutex);//unlock in case of failure
+                    thread->client_fd = -1;
+                    thread->thread_complete = true;
+                    return NULL;
                 }
+                pthread_mutex_unlock(&file_mutex);//unlock when finished 
                 msg_pos = 0;
-
             }
             else
             {
@@ -141,10 +131,11 @@ int handle_connection(void)
                 if(temp == NULL)
                 {
                     free(heap_buffer);
-                    close(client_fd);
-                    client_fd = -1;
+                    close(thread->client_fd);
+                    thread->client_fd = -1;
                     perror("realloc");
-                    return -1;
+                    thread->thread_complete = true;
+                    return NULL;
                 }
                 heap_buffer = temp;
                 }
@@ -153,10 +144,10 @@ int handle_connection(void)
             }
         }
     }
-    return 0;
+    thread->thread_complete = true;
+    return NULL;
 }
-
-int process_message (char* mssg)
+int process_message (char* mssg, int fd)
 {
     FILE * file = fopen(FILE_NAME,"a");
     if (file == NULL)
@@ -170,7 +161,6 @@ int process_message (char* mssg)
         perror("fprintf");
         return -1;
     }
-    fflush(file);//redundant
     fclose(file);
 
     FILE* read_file = fopen(FILE_NAME,"r");
@@ -183,7 +173,7 @@ int process_message (char* mssg)
     size_t bytes;
     while ((bytes = fread(send_buffer,1,sizeof(send_buffer),read_file)) > 0)
     {
-        if(send(client_fd,send_buffer,bytes,0) == -1)
+        if(send(fd,send_buffer,bytes,0) == -1)
         {
             perror("send");
             fclose(read_file);
@@ -221,6 +211,39 @@ int daemonize(void)
 
     return 0;
 }
+/*timer call back function*/
+void timer_callback(union sigval sv)
+{
+    (void)sv;
+    char buf[64];
+    struct timespec ts;
+    struct tm tm_info;
+    clock_gettime(CLOCK_REALTIME,&ts);
+    if((localtime_r(&ts.tv_sec,&tm_info)) == NULL)
+    {
+        perror("localtime_r");
+        return ;
+    }
+    strftime(buf,sizeof(buf),"%a, %d %b %Y %T %z",&tm_info);
+    pthread_mutex_lock(&file_mutex);
+
+    FILE * file = fopen(FILE_NAME,"a");
+    if (file == NULL)
+    {
+        perror("fopen");
+        pthread_mutex_unlock(&file_mutex);
+        return ;
+    }
+    if(fprintf(file, "timestamp:%s\n", buf) < 0)
+    {
+        fclose(file);
+        perror("fprintf");
+        pthread_mutex_unlock(&file_mutex);
+        return ;
+    }
+    fclose(file);
+    pthread_mutex_unlock(&file_mutex);
+}
 
 int main(int argc, char *argv[])
 {
@@ -230,30 +253,6 @@ int main(int argc, char *argv[])
         fprintf(stderr, "usage: ./aesdsocket or ./aesdsocket -d\n");
         return 1;
     }
-    
-    openlog("aesdsocket", LOG_PID, LOG_USER);
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));          // zero first
-    sa.sa_handler  = signal_handler;     // callback function
-    sigemptyset(&sa.sa_mask);            // no extra blocked signals
-    sa.sa_flags    = 0;
-    if(sigaction(SIGINT, &sa, NULL) == -1)
-    {
-        perror("sigaction");
-        return -1;
-    } 
-    if(sigaction(SIGTERM, &sa, NULL) == -1)
-    {
-        perror("sigaction");
-        return -1;
-    }  
-    
-    if(setup_socket() == -1)
-    {
-        cleanup();
-        return -1;
-    }
-    
     if (argc == 2)
     {
         if (strcmp(argv[1], "-d") == 0)
@@ -266,6 +265,29 @@ int main(int argc, char *argv[])
         return -1;
         }
     }
+    openlog("aesdsocket", LOG_PID, LOG_USER);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if(sigaction(SIGINT, &sa, NULL) == -1)
+    {
+        perror("sigaction");
+        return -1;
+    }
+    if(sigaction(SIGTERM, &sa, NULL) == -1)
+    {
+        perror("sigaction");
+        return -1;
+    }
+
+    if(setup_socket() == -1)
+    {
+        cleanup();
+        return -1;
+    }    
     if(daemon_mode)
     {
         if(daemonize() == -1)
@@ -274,15 +296,82 @@ int main(int argc, char *argv[])
             return -1;
         }
     }
+    
+    struct sigevent sev;
+    struct itimerspec its;
+
+    memset(&sev,0,sizeof(sev));
+    sev.sigev_notify = SIGEV_THREAD;
+    sev.sigev_notify_function = timer_callback;
+    sev.sigev_notify_attributes = NULL;
+
+    if(timer_create(CLOCK_REALTIME,&sev,&timer) == -1)
+    {
+        perror("timer_create");
+        return -1;
+    }
+    memset(&its,0,sizeof(its));
+    its.it_value.tv_sec = 10;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = 10;
+    its.it_interval.tv_nsec = 0;
+
+    timer_settime(timer,0,&its,NULL);
+
+
+    thread_node_t *np,*tmp;
+    SLIST_HEAD(thread_list_s, thread_node) thread_list = SLIST_HEAD_INITIALIZER(thread_list);
+
     while(!caught_signal)
     {
-        if(handle_connection() == -1)
+        struct sockaddr_storage client_addr;
+        socklen_t addr_size = sizeof(client_addr);
+        c_fd = accept(socketfd, (struct sockaddr*)&client_addr, &addr_size);
+        if(c_fd == -1)
         {
+            if(errno == EINTR) break;  //signal interrupted, exit loop cleanly
+            perror("accept");
             cleanup();
             return -1;
         }
+        char client_ip[INET6_ADDRSTRLEN];
+        struct sockaddr_in *s = (struct sockaddr_in *)&client_addr;
+        inet_ntop(AF_INET, &s->sin_addr, client_ip, sizeof(client_ip));
+
+        thread_node_t *node = malloc(sizeof(thread_node_t));
+        if(node == NULL) { perror("malloc"); cleanup(); return -1; }
+        node->client_fd = c_fd;
+        strcpy(node->client_ip,client_ip);
+        node->thread_complete = false;
+
+        int res = pthread_create(&node->tid,NULL,thread_connection,node);
+        if(res != 0)
+        {
+            perror("pthread_create");
+            free(node);
+            return -1;
+        }
+
+        SLIST_INSERT_HEAD(&thread_list,node,entries);//append the new node to the head of the list
+
+        SLIST_FOREACH_SAFE(np,&thread_list,entries,tmp)//traverse the list to look for joinable threads
+        {
+            if(np->thread_complete == true)
+            {
+                pthread_join(np->tid, NULL);
+                SLIST_REMOVE(&thread_list, np, thread_node, entries);
+                free(np);
+            }
+              
+        }        
     }
-    syslog(LOG_INFO, "Caught signal, exiting");
+    syslog(LOG_INFO,"Caught signal, exiting");
+    SLIST_FOREACH_SAFE(np, &thread_list, entries, tmp)
+    {
+        pthread_join(np->tid, NULL);
+        SLIST_REMOVE(&thread_list, np, thread_node, entries);
+        free(np);
+    }
     cleanup();
     return 0;
 }
