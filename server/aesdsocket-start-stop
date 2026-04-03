@@ -6,7 +6,7 @@ case "$1" in
         start-stop-daemon -S -n aesdsocket --exec /usr/bin/aesdsocket -- -d
         ;;
     stop)
-        echo "stoping aesdsocket"
+        echo "stopping aesdsocket"
         start-stop-daemon -K -n aesdsocket --signal TERM
         ;;
     *)
