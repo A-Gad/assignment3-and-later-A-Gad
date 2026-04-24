@@ -15,11 +15,13 @@ void signal_handler(int signo)
 }
 void cleanup(void)
 {
+    #if !USE_AESD_CHAR_DEVICE
     timer_delete(timer);
+    remove(FILE_NAME);
+    #endif
     pthread_mutex_destroy(&file_mutex);
     if(socketfd != -1)  close(socketfd);
-    if(c_fd != -1)  close(c_fd);
-    remove(FILE_NAME);
+    if(c_fd != -1)  close(c_fd); 
     closelog();
 }
 
@@ -149,38 +151,50 @@ void *thread_connection(void *args)
 }
 int process_message (char* mssg, int fd)
 {
-    FILE * file = fopen(FILE_NAME,"a");
-    if (file == NULL)
+    //FILE * file = fopen(FILE_NAME,"a"); //************
+    #if USE_AESD_CHAR_DEVICE
+    int file = open(FILE_NAME, O_WRONLY);
+    #else
+    int file = open(FILE_NAME, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    #endif
+    if (file == -1)
     {
-        perror("fopen");
+        perror("open");
         return -1;
     }
-    if(fprintf(file, "%s\n", mssg) < 0)
+    if (write(file, mssg, strlen(mssg)) == -1) 
     {
-        fclose(file);
-        perror("fprintf");
+        perror("write");
+        close(file);
         return -1;
     }
-    fclose(file);
+    if (write(file, "\n", 1) == -1) 
+    {
+        perror("write");
+        close(file);
+        return -1;
+    }
+    close(file);
 
-    FILE* read_file = fopen(FILE_NAME,"r");
-    if (read_file == NULL)
+    //FILE* read_file = fopen(FILE_NAME,"r");   //************************
+    int read_file = open(FILE_NAME,O_RDONLY);
+    if (read_file == -1)
     {
-        perror("fopen");
+        perror("open");
         return -1;
     }
     char send_buffer[RECV_BUFSIZE] ;
     size_t bytes;
-    while ((bytes = fread(send_buffer,1,sizeof(send_buffer),read_file)) > 0)
+    while ((bytes = read(read_file,send_buffer,sizeof(send_buffer))) > 0)
     {
         if(send(fd,send_buffer,bytes,0) == -1)
         {
             perror("send");
-            fclose(read_file);
+            close(read_file);
             return -1;
         }
     }
-    fclose(read_file);
+    close(read_file);
     return 0;
 }
 
@@ -227,7 +241,7 @@ void timer_callback(union sigval sv)
     strftime(buf,sizeof(buf),"%a, %d %b %Y %T %z",&tm_info);
     pthread_mutex_lock(&file_mutex);
 
-    FILE * file = fopen(FILE_NAME,"a");
+    FILE * file = fopen(FILE_NAME,"a"); //*************************
     if (file == NULL)
     {
         perror("fopen");
@@ -304,7 +318,7 @@ int main(int argc, char *argv[])
     sev.sigev_notify = SIGEV_THREAD;
     sev.sigev_notify_function = timer_callback;
     sev.sigev_notify_attributes = NULL;
-
+    #if !USE_AESD_CHAR_DEVICE
     if(timer_create(CLOCK_REALTIME,&sev,&timer) == -1)
     {
         perror("timer_create");
@@ -317,7 +331,7 @@ int main(int argc, char *argv[])
     its.it_interval.tv_nsec = 0;
 
     timer_settime(timer,0,&its,NULL);
-
+    #endif
 
     thread_node_t *np,*tmp;
     SLIST_HEAD(thread_list_s, thread_node) thread_list = SLIST_HEAD_INITIALIZER(thread_list);

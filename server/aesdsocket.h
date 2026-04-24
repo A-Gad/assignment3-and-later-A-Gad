@@ -25,8 +25,13 @@
         (var) = (tvar))
 
 /* Constants */
+#if USE_AESD_CHAR_DEVICE
+    #define FILE_NAME "/dev/aesdchar"
+#else
+    #define FILE_NAME "/var/tmp/aesdsocketdata"
+#endif
+
 #define PORT        "9000"
-#define FILE_NAME   "/var/tmp/aesdsocketdata"
 #define BACKLOG     5
 #define RECV_BUFSIZE 4096
 
