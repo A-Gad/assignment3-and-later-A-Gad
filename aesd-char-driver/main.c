@@ -18,6 +18,8 @@
 #include <linux/cdev.h>
 #include <linux/fs.h> // file_operations
 #include "aesdchar.h"
+#include "aesd-circular-buffer.h"  
+#include <linux/slab.h>            
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -50,18 +52,21 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 {
     ssize_t retval = 0;
     struct aesd_dev *dev = filp->private_data;
+    size_t entry_offset;
+    struct aesd_buffer_entry *entry;
+    size_t bytes_to_copy;
 
     if (mutex_lock_interruptible(&dev->lock))
         return -ERESTARTSYS;
-    size_t entry_offset;
-    struct aesd_buffer_entry* entry = aesd_circular_buffer_find_entry_offset_for_fpos(&dev->buffer,*f_pos,&entry_offset);
+    
+    entry = aesd_circular_buffer_find_entry_offset_for_fpos(&dev->buffer,*f_pos,&entry_offset);
     if (entry == NULL)
     {
         PDEBUG("position out of bound !");
         mutex_unlock(&dev->lock);
         return retval;
     }
-    size_t bytes_to_copy = min(count, entry->size - entry_offset);
+    bytes_to_copy = min(count, entry->size - entry_offset);
     if(copy_to_user(buf, entry->buffptr + entry_offset, bytes_to_copy))
     {
         PDEBUG("cannot copy to user!");
@@ -79,12 +84,14 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
     ssize_t retval = -ENOMEM;
+    size_t new_size;
     struct aesd_dev *dev = filp->private_data;
+    size_t i;
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
     if (mutex_lock_interruptible(&dev->lock))
         return -ERESTARTSYS;
     
-    size_t new_size = dev->partial_size + count;  
+    new_size = dev->partial_size + count;  
     dev->partial_write = krealloc(dev->partial_write, new_size, GFP_KERNEL);
 
     if(dev->partial_write == NULL)
@@ -103,16 +110,17 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         return -EFAULT;
     }
     dev->partial_size = new_size;
-
-    for (size_t i = dev->partial_size - count; i < dev->partial_size; i++)
+    for (i = dev->partial_size - count; i < dev->partial_size; i++)
     {
+        struct aesd_buffer_entry entry;
+        size_t remaining;
+        char *new_partial;
+
         if(dev->partial_write[i] == '\n')
         {
-            struct aesd_buffer_entry entry;
-
             entry.buffptr = dev->partial_write;
             entry.size = i + 1;
-            size_t remaining = dev->partial_size - (i + 1);
+            remaining = dev->partial_size - (i + 1);
 
             if (dev->buffer.full) 
             {
@@ -120,7 +128,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                 kfree(dev->buffer.entry[dev->buffer.out_offs].buffptr);
             }
             if (remaining > 0) {
-            char *new_partial = kmalloc(remaining, GFP_KERNEL);
+            new_partial = kmalloc(remaining, GFP_KERNEL);
             if (new_partial == NULL) 
             {
                 kfree(dev->partial_write);
