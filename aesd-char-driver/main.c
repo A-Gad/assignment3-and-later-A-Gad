@@ -111,16 +111,35 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
             struct aesd_buffer_entry entry;
 
             entry.buffptr = dev->partial_write;
-            entry.size = dev->partial_size;
+            entry.size = i + 1;
+            size_t remaining = dev->partial_size - (i + 1);
 
             if (dev->buffer.full) 
             {
-                PDEBUG("buffer full, overwriting oldes entry...");
+                PDEBUG("buffer full, overwriting oldest entry...");
                 kfree(dev->buffer.entry[dev->buffer.out_offs].buffptr);
             }
+            if (remaining > 0) {
+            char *new_partial = kmalloc(remaining, GFP_KERNEL);
+            if (new_partial == NULL) 
+            {
+                kfree(dev->partial_write);
+                dev->partial_write = NULL;
+                dev->partial_size = 0;
+                mutex_unlock(&dev->lock);
+                return -ENOMEM;
+            }
+            memcpy(new_partial, dev->partial_write + (i + 1), remaining);
             aesd_circular_buffer_add_entry(&dev->buffer, &entry);
-            dev->partial_write = NULL;
-            dev->partial_size = 0;
+            dev->partial_write = new_partial;
+            dev->partial_size = remaining;
+            } 
+            else 
+            {
+                aesd_circular_buffer_add_entry(&dev->buffer, &entry);
+                dev->partial_write = NULL;
+                dev->partial_size = 0;
+            }
             break;
         }
     }
