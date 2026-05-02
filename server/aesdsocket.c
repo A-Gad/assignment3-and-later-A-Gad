@@ -1,5 +1,5 @@
 #include "aesdsocket.h"
-#include "aesd_ioctl.h"
+#include "../aesd-char-driver/aesd_ioctl.h"
 pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 timer_t timer;
 volatile sig_atomic_t caught_signal = 0;
