@@ -17,8 +17,10 @@
 #include <linux/types.h>
 #include <linux/cdev.h>
 #include <linux/fs.h> // file_operations
-#include "aesdchar.h" 
-#include <linux/slab.h>            
+#include <linux/mutex.h>
+#include <linux/uaccess.h>
+#include "aesdchar.h"
+#include <linux/slab.h>
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -154,12 +156,101 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     retval = count;
     return retval;
 }
+/*llseek*/
+loff_t aesd_llseek(struct file *filp, loff_t off, int whence)
+{
+    struct aesd_dev* dev = filp->private_data;
+    loff_t size = 0;
+    loff_t newpos;
+    struct aesd_buffer_entry *entryptr;
+    int index = 0;
+    
+    if (mutex_lock_interruptible(&dev->lock))
+        return -ERESTARTSYS;
+    AESD_CIRCULAR_BUFFER_FOREACH(entryptr, &dev->buffer, index)
+    {
+        size += entryptr->size;
+    }
+    newpos = fixed_size_llseek(filp,off,whence,size);
+    mutex_unlock(&dev->lock);
+    if (newpos < 0) return -EINVAL;
+
+    return newpos;
+}
+/*aesd_adjust_file_offset*/
+static long aesd_adjust_file_offset(struct file* filp, unsigned int write_cmd, unsigned int write_cmd_offset)
+{
+    struct aesd_dev* dev = filp->private_data;
+    long retval = 0;
+    long newpos = 0;
+    unsigned int i;
+    unsigned int write_index;
+    unsigned int count;
+    if (mutex_lock_interruptible(&dev->lock))
+        return -ERESTARTSYS;
+    write_index = (dev->buffer.out_offs + write_cmd) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    count = dev->buffer.full ? AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED
+                                 : (dev->buffer.in_offs - dev->buffer.out_offs) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    if (write_cmd >= count)
+    {
+        mutex_unlock(&dev->lock);
+        return -EINVAL;
+    }
+    if(dev->buffer.entry[write_index].buffptr == NULL)
+    {
+        mutex_unlock(&dev->lock);
+        return -EINVAL;
+    }
+    if(write_cmd_offset >= dev->buffer.entry[write_index].size)
+    {
+        mutex_unlock(&dev->lock);
+        return -EINVAL;
+    }
+    for (i = 0; i < write_cmd; i++) 
+    {
+        unsigned int idx = (dev->buffer.out_offs + i) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+        newpos += dev->buffer.entry[idx].size;
+    }
+    newpos += write_cmd_offset;
+    filp->f_pos = newpos;
+    mutex_unlock(&dev->lock);
+    return newpos;
+}
+/*ioctl*/
+long aesd_ioctl(struct file* filp, unsigned int cmd, unsigned long argp)
+{
+    // struct aesd_dev* dev = filp->private_data;
+    struct aesdseekto seekto;
+    long retval = 0;
+    switch (cmd)
+    {
+        case AESDCHAR_IOCSEEKTO :
+            {
+                if(copy_from_user(&seekto, (const void __user *)argp, sizeof(seekto)) != 0)
+                {
+                    retval = -EFAULT;
+                }
+                else
+                {
+                    retval = aesd_adjust_file_offset(filp, seekto.write_cmd, seekto.write_cmd_offset);
+                }
+        break;
+            }
+        default:
+            retval = -ENOTTY;;
+        break;
+    }
+    return retval;
+}
+
 struct file_operations aesd_fops = {
-    .owner =    THIS_MODULE,
-    .read =     aesd_read,
-    .write =    aesd_write,
-    .open =     aesd_open,
-    .release =  aesd_release,
+    .owner =          THIS_MODULE,
+    .read =           aesd_read,
+    .write =          aesd_write,
+    .open =           aesd_open,
+    .release =        aesd_release,
+    .unlocked_ioctl = aesd_ioctl,
+    .llseek = aesd_llseek,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
@@ -201,6 +292,7 @@ int aesd_init_module(void)
     return result;
 
 }
+
 
 void aesd_cleanup_module(void)
 {

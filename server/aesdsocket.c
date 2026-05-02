@@ -1,4 +1,5 @@
 #include "aesdsocket.h"
+#include "aesd_ioctl.h"
 pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 timer_t timer;
 volatile sig_atomic_t caught_signal = 0;
@@ -151,11 +152,44 @@ void *thread_connection(void *args)
 }
 int process_message (char* mssg, int fd)
 {
-    //FILE * file = fopen(FILE_NAME,"a"); //************
+    int file = -1;
+    int read_file = -1;
+    char send_buffer[RECV_BUFSIZE] ;
+    size_t bytes;
     #if USE_AESD_CHAR_DEVICE
-    int file = open(FILE_NAME, O_WRONLY);
+    unsigned int x, y;
+    if(sscanf(mssg,"AESDCHAR_IOCSEEKTO:%u,%u", &x, &y) == 2)
+    {
+        file = open(FILE_NAME,O_RDWR);
+        if (file == -1) 
+        {
+            perror("open");
+            return -1;
+        }
+        struct aesd_seekto seekto;
+        seekto.write_cmd = x;
+        seekto.write_cmd_offset = y;
+        if(ioctl(file,AESDCHAR_IOCSEEKTO, &seekto) < 0)
+        {
+            close(file);
+            return -1;
+        }
+        while ((bytes = read(file,send_buffer,sizeof(send_buffer))) > 0)
+        {
+            if(send(fd,send_buffer,bytes,0) == -1)
+            {
+            perror("send");
+            close(file);
+            return -1;
+            }
+        }
+        close(file);
+        return 0;
+    }
+    file = open(FILE_NAME, O_WRONLY);
+
     #else
-    int file = open(FILE_NAME, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    file = open(FILE_NAME, O_WRONLY | O_CREAT | O_APPEND, 0644);
     #endif
     if (file == -1)
     {
@@ -177,14 +211,12 @@ int process_message (char* mssg, int fd)
     close(file);
 
     //FILE* read_file = fopen(FILE_NAME,"r");   //************************
-    int read_file = open(FILE_NAME,O_RDONLY);
+    read_file = open(FILE_NAME,O_RDONLY);
     if (read_file == -1)
     {
         perror("open");
         return -1;
     }
-    char send_buffer[RECV_BUFSIZE] ;
-    size_t bytes;
     while ((bytes = read(read_file,send_buffer,sizeof(send_buffer))) > 0)
     {
         if(send(fd,send_buffer,bytes,0) == -1)
